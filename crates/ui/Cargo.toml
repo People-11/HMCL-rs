@@ -1,0 +1,32 @@
+[package]
+name = "hmcl-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# 这个 crate 只有一件事：把 ui/app.slint 编成 Rust。
+#
+# 之所以要单独拆出来：slint-build 会把 6600 行的 app.slint 展开成一个 32 MB / 33 万行
+# 的 app.rs。以前它和 main.rs 同属一个 crate，于是**改任何一行 Rust 逻辑都要连这
+# 33 万行一起重新编译**（实测每次约 19 秒）。拆开之后 app.rs 只在 app.slint 真的
+# 改了的时候才重编。
+
+[dependencies]
+slint.workspace = true
+# ponytail: 不开 slint 的 image-default-formats——那个 feature 会把 image crate 的
+# 全部解码器（tga/dds/hdr/pnm/qoi/farbfeld/exr/avif…）都编进来。这里显式依赖 image
+# 并只开真正会遇到的格式，feature 统一会让 slint 内部用的那份 image 也只有这些。
+#
+# 这个清单不是按"我们自己的资源用什么"定的，而是按**别人的图片会是什么**定的：
+# 模组/整合包的项目图标是从 Modrinth 下下来的，作者传什么格式都有（真实踩到过
+# 一个 .gif 的项目图标）。Modrinth 允许的位图格式就是下面这几种，全开。
+# SVG 走 resvg，不受这里影响。
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+] }
+
+[build-dependencies]
+slint-build = "1"

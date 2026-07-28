@@ -1,0 +1,7 @@
+/target
+
+# hmcl-cli 手动验证用的真实 .minecraft 测试目录 (含真实下载的游戏文件, 几百 MB)
+/mc-test-dir/
+
+# hmcl-cli 在仓库根目录跑 `account` 子命令时会在这里生成 HMCL_LOCAL_HOME
+/.hmcl/

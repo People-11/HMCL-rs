@@ -1,0 +1,72 @@
+[workspace]
+resolver = "2"
+members = ["crates/cli", "crates/core", "crates/gui", "crates/ui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# HMCL uses a handful of short ASCII version/JVM/OS regexes. The PikeVM is
+# enough; Unicode character tables plus the multi-engine perf bundle add ~700 KiB.
+regex = { version = "1", default-features = false, features = ["std"] }
+thiserror = "2"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tokio = { version = "1", features = ["rt-multi-thread", "fs", "process", "sync", "time", "io-util", "macros"] }
+# ponytail: rustls-tls only, never native-tls/openssl (openssl-sys is a build headache on windows-gnu).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "gzip", "http2"] }
+futures = { version = "0.3", default-features = false, features = ["std"] }
+sha1 = { version = "0.10", default-features = false }
+md-5 = { version = "0.10", default-features = false }
+base64 = "0.22"
+ring = "0.17"
+wiremock = "0.6"
+uuid = { version = "1", features = ["v7"] }
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+zip = { version = "2", default-features = false, features = ["flate2", "deflate-flate2"] }
+# ponytail: level.dat 是 gzip 过的 NBT。fastnbt 的 Value 能原样读进来再原样写回去
+# （标签类型不会被改写，见 WORLD_MANAGEMENT.md 硬约束 5）；flate2 本来就是 zip 的
+# 传递依赖，提成直接依赖不增加编译量。
+fastnbt = "2"
+flate2 = "1"
+# ponytail: 备份文件名要本机时区的 yyyy-MM-dd_HH-mm-ss。chrono 已经是 slint 的
+# 传递依赖（在 Cargo.lock 里），比自己搓一套 civil-from-days + Windows 时区 FFI 划算。
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# ponytail: default-features off -> no Skia. Skia has no prebuilt for windows-gnu
+# and needs clang-cl. femtovg (pure Rust + OpenGL) is the only viable renderer here.
+slint = { version = "1", default-features = false, features = [
+    "compat-1-2",
+    "std",
+    "backend-winit",
+    "renderer-femtovg",
+    "renderer-software",
+] }
+
+# app.slint 会被 slint-build 展开成一个 32 MB 的 app.rs（6600 行 .slint -> 约 90 万行
+# Rust），它一个人就决定了这个项目的编译时间和 debug 产物体积。所以 dev 侧的调优
+# 全都围绕"别给这堆生成代码带调试信息"：
+[profile.dev]
+# 完整 DWARF 会把 hmcl-gui.exe 撑到 970 MB。line-tables-only 保留 panic 回溯里的
+# 文件名+行号（日常调试真正用得上的部分），体积只有零头。真要上单步调试器时把
+# 这一行临时改回 `debug = true`。
+debug = "line-tables-only"
+
+# 依赖（slint/reqwest/image/... 共 391 个 crate）的调试信息我们从来不看，
+# 但它占了 target/debug 的大头。
+[profile.dev.package."*"]
+debug = false
+
+# ponytail: windows-gnu only, no MSVC. Skia is not buildable here -> femtovg + software.
+[profile.release]
+strip = true
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+rpath = false
