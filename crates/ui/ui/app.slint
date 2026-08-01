@@ -576,30 +576,6 @@ component DownloadInstanceField inherits Rectangle {
     }
 }
 
-component CompactButton inherits Rectangle {
-    in property <string> text;
-    in property <bool> enabled: true;
-    callback clicked();
-    height: 30px;
-    min-width: 52px;
-    border-radius: 4px;
-    border-width: 1px;
-    border-color: root.enabled ? #aeb2ce : #d3d4df;
-    opacity: root.enabled ? 1 : 0.45;
-    background: compact-hover.pressed ? #dcddea : (compact-hover.has-hover ? #eeeef6 : #ffffff55);
-    animate background { duration: 90ms; }
-    compact-hover := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
-    Text {
-        text: root.text;
-        color: #4f59b2;
-        font-size: 11px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        width: 100%;
-        height: 100%;
-    }
-}
-
 component ProjectTag inherits Rectangle {
     in property <string> text;
     height: 18px;
@@ -1596,6 +1572,7 @@ export component AppWindow inherits Window {
     in-out property <string> selected-mod-file-name: "";
     in-out property <string> selected-mod-version-title: "";
     in-out property <string> selected-mod-version-detail: "";
+    in-out property <bool> selected-mod-version-release: true;
     callback search-mods();
     callback load-more-mods();
     callback open-mod-project(string);
@@ -4059,6 +4036,7 @@ export component AppWindow inherits Window {
                                                 root.selected-mod-file-name = version.file-name;
                                                 root.selected-mod-version-title = version.title;
                                                 root.selected-mod-version-detail = version.channel + (version.loaders == "" ? "" : " · " + version.loaders);
+                                                root.selected-mod-version-release = version.channel == "正式版";
                                                 if root.mod-search-kind == 3 {
                                                     root.modpack-import-instance-name = root.suggest-instance-name(root.mod-detail-title);
                                                     root.modpack-instance-name-conflict =
@@ -6443,12 +6421,12 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         padding: 12px;
                         spacing: 12px;
-                        IconGlyph {
-                            d: Icons.check-circle;
-                            fill: #4f55b3;
+                        VerticalLayout {
                             width: 28px;
-                            height: 28px;
-                            y: (parent.height - self.height) / 2;
+                            alignment: center;
+                            VersionChannelIcon {
+                                release: root.selected-mod-version-release;
+                            }
                         }
                         VerticalLayout {
                             alignment: center;
@@ -6493,26 +6471,21 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     alignment: end;
                     spacing: 8px;
-                    CompactButton { text: "取消"; clicked => { root.show-mod-version-dialog = false; } }
-                    Rectangle {
-                        width: 64px;
-                        height: 32px;
-                        border-radius: 4px;
-                        background: (root.mod-search-kind == 3
-                                && (root.modpack-import-instance-name == "" || root.modpack-instance-name-conflict))
-                            || (root.mod-search-kind != 3 && root.selected-mod-file-name == "") ? #aaa
-                            : (install-version-hover.pressed ? #454ab2 : (install-version-hover.has-hover ? #565bd0 : #6266d8));
-                        install-version-hover := TouchArea {
-                            enabled: (root.mod-search-kind == 3
-                                    && root.modpack-import-instance-name != ""
-                                    && !root.modpack-instance-name-conflict)
-                                || (root.mod-search-kind != 3 && root.selected-mod-file-name != "");
-                            clicked => {
-                                root.show-mod-version-dialog = false;
-                                root.install-mod-version(root.selected-mod-version-id, root.selected-mod-file-name);
-                            }
+                    DialogActionButton {
+                        text: "取消";
+                        clicked => { root.show-mod-version-dialog = false; }
+                    }
+                    DialogActionButton {
+                        text: "安装";
+                        text-color: #4f5fb4;
+                        enabled: (root.mod-search-kind == 3
+                                && root.modpack-import-instance-name != ""
+                                && !root.modpack-instance-name-conflict)
+                            || (root.mod-search-kind != 3 && root.selected-mod-file-name != "");
+                        clicked => {
+                            root.show-mod-version-dialog = false;
+                            root.install-mod-version(root.selected-mod-version-id, root.selected-mod-file-name);
                         }
-                        Text { text: "安装"; color: white; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; width: 100%; height: 100%; }
                     }
                 }
             }
