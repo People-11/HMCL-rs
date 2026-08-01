@@ -2727,7 +2727,7 @@ export component AppWindow inherits Window {
                                 } else if root.page == 6 {
                                     root.navigate-to(1, 2);
                                 } else if root.page == 7 {
-                                    root.navigate-to(root.settings-return-page, 2);
+                                    root.navigate-to(root.settings-return-page, 3);
                                 } else if root.page == 8 {
                                     root.navigate-to(6, 2);
                                 } else if root.page == 3 && root.mod-detail-open {
@@ -2888,7 +2888,7 @@ export component AppWindow inherits Window {
                                         root.navigate-to(1, 0);
                                     } else {
                                         root.open-instance-settings(root.selected-instance-id);
-                                        root.navigate-to(6, 1);
+                                        root.navigate-to(6, 0);
                                     }
                                 }
                             }
@@ -2916,7 +2916,7 @@ export component AppWindow inherits Window {
                                 subtitle: "";
                                 clicked => {
                                     root.settings-return-page = 0;
-                                    root.settings-tab = 3;
+                                    root.settings-tab = 0;
                                     root.navigate-to(7, 0);
                                 }
                             }
@@ -4512,6 +4512,14 @@ export component AppWindow inherits Window {
                     width: 100%;
                     height: 100%;
                     states [
+                        navigation-out when root.page-transition-phase == 1 && (root.page-transition-kind == 0 || root.page-transition-kind == 3): {
+                            x: 30px;
+                            in { animate x { duration: 100ms; easing: ease; } }
+                        }
+                        navigation-in when root.page-transition-phase == 2 && (root.page-transition-kind == 0 || root.page-transition-kind == 3): {
+                            x: 30px;
+                            out { animate x { duration: 100ms; easing: ease; } }
+                        }
                         forward-out when root.settings-tab-phase == 1 && root.settings-tab-forward: {
                             x: -50px;
                             opacity: 0;
@@ -4886,6 +4894,14 @@ export component AppWindow inherits Window {
                     width: 100%;
                     height: 100%;
                     states [
+                        navigation-out when root.page-transition-phase == 1 && (root.page-transition-kind == 0 || root.page-transition-kind == 3): {
+                            x: 30px;
+                            in { animate x { duration: 100ms; easing: ease; } }
+                        }
+                        navigation-in when root.page-transition-phase == 2 && (root.page-transition-kind == 0 || root.page-transition-kind == 3): {
+                            x: 30px;
+                            out { animate x { duration: 100ms; easing: ease; } }
+                        }
                         forward-out when root.instance-tab-phase == 1 && root.instance-tab-forward: {
                             x: -50px;
                             opacity: 0;
