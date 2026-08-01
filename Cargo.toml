@@ -45,7 +45,6 @@ slint = { version = "1", default-features = false, features = [
     "std",
     "backend-winit",
     "renderer-femtovg",
-    "renderer-software",
 ] }
 
 # app.slint 会被 slint-build 展开成一个 32 MB 的 app.rs（6600 行 .slint -> 约 90 万行
