@@ -6421,11 +6421,12 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         padding: 12px;
                         spacing: 12px;
-                        VerticalLayout {
+                        Rectangle {
                             width: 28px;
-                            alignment: center;
                             VersionChannelIcon {
                                 release: root.selected-mod-version-release;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
                             }
                         }
                         VerticalLayout {
@@ -6516,11 +6517,15 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     height: 38px;
                     spacing: 12px;
-                    IconGlyph {
-                        d: Icons.help;
-                        fill: #5968c2;
+                    Rectangle {
                         width: 28px;
-                        height: 28px;
+                        IconGlyph {
+                            d: Icons.help;
+                            fill: #5968c2;
+                            width: 28px;
+                            height: 28px;
+                            y: (parent.height - self.height) / 2;
+                        }
                     }
                     VerticalLayout {
                         alignment: center;
@@ -7430,15 +7435,15 @@ export component AppWindow inherits Window {
                     spacing: 8px;
                     alignment: end;
                     DialogActionButton {
+                        text: "取消";
+                        clicked => { root.close-account-dialog(); }
+                    }
+                    DialogActionButton {
                         text: "登录";
                         text-color: #4f5fb4;
                         enabled: root.account-dialog-username != ""
                             && root.account-dialog-uuid-valid;
                         clicked => { root.submit-account-dialog(); }
-                    }
-                    DialogActionButton {
-                        text: "取消";
-                        clicked => { root.close-account-dialog(); }
                     }
                 }
             }
