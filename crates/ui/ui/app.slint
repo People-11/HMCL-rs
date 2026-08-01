@@ -1911,6 +1911,7 @@ export component AppWindow inherits Window {
     in-out property <int> file-source-index: 0;
     in-out property <bool> auto-download-threads: true;
     in-out property <string> download-threads: "64";
+    in-out property <bool> cache-clear-loading: false;
 
     in property <[JavaRow]> java-runtimes;
     in property <bool> java-download-loading: false;
@@ -1929,7 +1930,7 @@ export component AppWindow inherits Window {
     in-out property <string> global-min-memory: "";
     in-out property <string> global-max-memory: "2048";
     in-out property <string> global-perm-size: "";
-    in-out property <int> global-launcher-visibility-index: 2;
+    in-out property <int> global-launcher-visibility-index: 0;
     in-out property <int> global-window-type-index: 0;
     in-out property <string> global-window-width: "1280";
     in-out property <string> global-window-height: "720";
@@ -2127,7 +2128,7 @@ export component AppWindow inherits Window {
     in-out property <string> quick-play-realms: "";
 
     in-out property <bool> launcher-visibility-overridden: false;
-    in-out property <int> launcher-visibility-index: 2; // 0=关闭 1=隐藏 2=保持 3=隐藏后重开
+    in-out property <int> launcher-visibility-index: 0; // 0=保持显示 1=最小化 2=退出
     in-out property <bool> debug-log-overridden: false;
     in-out property <bool> debug-log: false;
 
@@ -2287,6 +2288,7 @@ export component AppWindow inherits Window {
     callback install-instance-loader(int, string);
     callback cancel-install();
     callback install-progress-frame-tick();
+    callback clear-download-cache();
     callback derive-offline-uuid(string) -> string;
     callback valid-uuid(string) -> bool;
 
@@ -4677,8 +4679,8 @@ export component AppWindow inherits Window {
                                 VerticalLayout {
                                     LauncherChoiceLine {
                                         width: 100%;
-                                        label: "启动器可见性";
-                                        options: ["关闭启动器", "隐藏启动器", "保持启动器", "退出后重新显示"];
+                                        label: "启动游戏后";
+                                        options: ["保持显示", "最小化", "退出"];
                                         selected-index <=> root.global-launcher-visibility-index;
                                     }
                                     LauncherToggleLine { label: "输出调试信息"; value <=> root.global-debug-log; }
@@ -4875,6 +4877,20 @@ export component AppWindow inherits Window {
                                         placeholder: "64";
                                         enabled: !root.auto-download-threads;
                                         opacity: root.auto-download-threads ? 0.55 : 1;
+                                    }
+                                }
+                            }
+
+                            SettingsCardTitle { text: "缓存"; }
+                            SettingsGroup {
+                                LauncherSettingLine {
+                                    label: "清除缓存";
+                                    sublabel: "清除所有游戏文件夹中的安装、模组、整合包、图标及启动器下载缓存";
+                                    SettingsToolbarButton {
+                                        icon-path: Icons.delete-icon;
+                                        label: "清除";
+                                        enabled: !root.cache-clear-loading && !root.show-install-progress;
+                                        clicked => { root.clear-download-cache(); }
                                     }
                                 }
                             }
@@ -5113,8 +5129,8 @@ export component AppWindow inherits Window {
                         SettingsGroup {
                             VerticalLayout {
                                 LauncherChoiceLine {
-                                    label: "游戏启动后";
-                                    options: ["关闭启动器", "隐藏启动器", "保持启动器", "游戏退出后重新显示"];
+                                    label: "启动游戏后";
+                                    options: ["保持显示", "最小化", "退出"];
                                     selected-index <=> root.launcher-visibility-index;
                                     show-inherit: true;
                                     overridden <=> root.launcher-visibility-overridden;

@@ -124,9 +124,9 @@ impl From<ProcessPriority> for crate::launch::ProcessPriority {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum LauncherVisibility {
     Close,
-    Hide,
+    #[serde(alias = "HIDE", alias = "HIDE_AND_REOPEN")]
+    Minimize,
     Keep,
-    HideAndReopen,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -763,12 +763,25 @@ mod tests {
     fn process_priority_and_launcher_visibility_serde_match_java_screaming_snake_case() {
         let settings = InstanceGameSettings {
             process_priority: Some(ProcessPriority::BelowNormal),
-            launcher_visibility: Some(LauncherVisibility::HideAndReopen),
+            launcher_visibility: Some(LauncherVisibility::Minimize),
             ..Default::default()
         };
         let json = serde_json::to_value(&settings).unwrap();
         assert_eq!(json["processPriority"], "BELOW_NORMAL");
-        assert_eq!(json["launcherVisibility"], "HIDE_AND_REOPEN");
+        assert_eq!(json["launcherVisibility"], "MINIMIZE");
+        let legacy: InstanceGameSettings =
+            serde_json::from_value(serde_json::json!({ "launcherVisibility": "HIDE" })).unwrap();
+        assert_eq!(
+            legacy.launcher_visibility,
+            Some(LauncherVisibility::Minimize)
+        );
+        let legacy: InstanceGameSettings =
+            serde_json::from_value(serde_json::json!({ "launcherVisibility": "HIDE_AND_REOPEN" }))
+                .unwrap();
+        assert_eq!(
+            legacy.launcher_visibility,
+            Some(LauncherVisibility::Minimize)
+        );
     }
 
     #[test]

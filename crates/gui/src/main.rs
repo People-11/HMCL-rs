@@ -32,6 +32,7 @@ use hmcl_core::settings::authlib_injector_servers::{
 use hmcl_core::settings::game_directories::{
     GameDirectoriesFile, GameDirectory, LocalizedText, LOCAL_DEFAULT_ID,
 };
+use hmcl_core::settings::instance_game_settings::LauncherVisibility;
 use hmcl_core::settings::launcher_data_dir;
 use hmcl_core::settings::launcher_settings::LauncherSettings;
 use hmcl_core::version::Env;
@@ -135,6 +136,50 @@ fn game_directories_file_path() -> PathBuf {
     launcher_data_dir()
         .join("config")
         .join("game-directories.json")
+}
+
+fn download_cache_directories() -> Vec<PathBuf> {
+    let loaded = hmcl_core::settings::load::<GameDirectoriesFile>(
+        &game_directories_file_path(),
+        hmcl_core::settings::game_directories::SCHEMA_ID,
+    )
+    .value;
+    let directories = if loaded.directories.is_empty() {
+        vec![default_game_directory()]
+    } else {
+        loaded.directories
+    };
+    let mut caches = directories
+        .into_iter()
+        .map(|directory| {
+            PathBuf::from(
+                hmcl_core::settings::game_directories::normalize_portable_path(&directory.path),
+            )
+            .join(".hmcl-rs-cache")
+        })
+        .collect::<BTreeSet<_>>();
+    caches.insert(launcher_data_dir().join("cache"));
+    caches.into_iter().collect()
+}
+
+fn clear_download_caches() -> Result<(), String> {
+    clear_cache_directories(download_cache_directories())
+}
+
+fn clear_cache_directories(directories: impl IntoIterator<Item = PathBuf>) -> Result<(), String> {
+    let failures = directories
+        .into_iter()
+        .filter_map(|path| match std::fs::remove_dir_all(&path) {
+            Ok(()) => None,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => Some(format!("{}: {error}", path.display())),
+        })
+        .collect::<Vec<_>>();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
 fn default_game_directory() -> GameDirectory {
@@ -660,6 +705,38 @@ fn selected_global_preset<'a>(
         .or_else(|| file.presets.first())
 }
 
+fn launcher_visibility_from_name(value: Option<&str>) -> LauncherVisibility {
+    match value {
+        Some("CLOSE") => LauncherVisibility::Close,
+        Some("MINIMIZE" | "HIDE" | "HIDE_AND_REOPEN") => LauncherVisibility::Minimize,
+        _ => LauncherVisibility::Keep,
+    }
+}
+
+fn launcher_visibility_index(value: LauncherVisibility) -> i32 {
+    match value {
+        LauncherVisibility::Keep => 0,
+        LauncherVisibility::Minimize => 1,
+        LauncherVisibility::Close => 2,
+    }
+}
+
+fn launcher_visibility_from_index(index: i32) -> LauncherVisibility {
+    match index {
+        1 => LauncherVisibility::Minimize,
+        2 => LauncherVisibility::Close,
+        _ => LauncherVisibility::Keep,
+    }
+}
+
+fn launcher_visibility_name(index: i32) -> &'static str {
+    match launcher_visibility_from_index(index) {
+        LauncherVisibility::Keep => "KEEP",
+        LauncherVisibility::Minimize => "MINIMIZE",
+        LauncherVisibility::Close => "CLOSE",
+    }
+}
+
 fn populate_global_settings_ui(
     ui: &AppWindow,
     launcher: &LauncherSettings,
@@ -711,14 +788,9 @@ fn populate_global_settings_ui(
             .unwrap_or_default()
             .into(),
     );
-    ui.set_global_launcher_visibility_index(
-        match preset.and_then(|p| p.launcher_visibility.as_deref()) {
-            Some("CLOSE") => 0,
-            Some("HIDE") => 1,
-            Some("HIDE_AND_REOPEN") => 3,
-            _ => 2,
-        },
-    );
+    ui.set_global_launcher_visibility_index(launcher_visibility_index(
+        launcher_visibility_from_name(preset.and_then(|p| p.launcher_visibility.as_deref())),
+    ));
     ui.set_global_window_type_index(match preset.and_then(|p| p.window_type.as_deref()) {
         Some("FULLSCREEN") => 1,
         _ => 0,
@@ -872,15 +944,8 @@ fn apply_ui_to_global_preset(ui: &AppWindow, preset: &mut GlobalGameSettingsPres
         .ok()
         .map(|value| value.clamp(256, 131_072));
     preset.perm_size = ui.get_global_perm_size().trim().parse().ok();
-    preset.launcher_visibility = Some(
-        match ui.get_global_launcher_visibility_index() {
-            0 => "CLOSE",
-            2 => "KEEP",
-            3 => "HIDE_AND_REOPEN",
-            _ => "HIDE",
-        }
-        .to_string(),
-    );
+    preset.launcher_visibility =
+        Some(launcher_visibility_name(ui.get_global_launcher_visibility_index()).to_string());
     preset.window_type = Some(
         if ui.get_global_window_type_index() == 1 {
             "FULLSCREEN"
@@ -3315,21 +3380,13 @@ fn populate_instance_settings_ui(
 
     ui.set_launcher_visibility_overridden(s.is_overridden(PROPERTY_LAUNCHER_VISIBILITY));
     let launcher_visibility = if s.is_overridden(PROPERTY_LAUNCHER_VISIBILITY) {
-        s.launcher_visibility.map(|value| match value {
-            LauncherVisibility::Close => "CLOSE",
-            LauncherVisibility::Hide => "HIDE",
-            LauncherVisibility::Keep => "KEEP",
-            LauncherVisibility::HideAndReopen => "HIDE_AND_REOPEN",
-        })
+        s.launcher_visibility.unwrap_or(LauncherVisibility::Keep)
     } else {
-        global.and_then(|preset| preset.launcher_visibility.as_deref())
+        launcher_visibility_from_name(
+            global.and_then(|preset| preset.launcher_visibility.as_deref()),
+        )
     };
-    ui.set_launcher_visibility_index(match launcher_visibility {
-        Some("CLOSE") => 0,
-        Some("HIDE") => 1,
-        Some("HIDE_AND_REOPEN") => 3,
-        _ => 2,
-    });
+    ui.set_launcher_visibility_index(launcher_visibility_index(launcher_visibility));
     ui.set_debug_log_overridden(s.is_overridden(PROPERTY_ENABLE_DEBUG_LOG_OUTPUT));
     ui.set_debug_log(if s.is_overridden(PROPERTY_ENABLE_DEBUG_LOG_OUTPUT) {
         s.enable_debug_log_output.unwrap_or(false)
@@ -3525,12 +3582,9 @@ fn apply_ui_to_instance_settings(
     s.quick_play_multiplayer = Some(ui.get_quick_play_multiplayer().to_string());
     s.quick_play_singleplayer = Some(ui.get_quick_play_singleplayer().to_string());
     s.quick_play_realms = Some(ui.get_quick_play_realms().to_string());
-    s.launcher_visibility = Some(match ui.get_launcher_visibility_index() {
-        0 => LauncherVisibility::Close,
-        2 => LauncherVisibility::Keep,
-        3 => LauncherVisibility::HideAndReopen,
-        _ => LauncherVisibility::Hide,
-    });
+    s.launcher_visibility = Some(launcher_visibility_from_index(
+        ui.get_launcher_visibility_index(),
+    ));
     s.enable_debug_log_output = Some(ui.get_debug_log());
     s.running_directory = Some(ui.get_running_directory().to_string());
     s.game_arguments = Some(ui.get_game_arguments().to_string());
@@ -4412,19 +4466,16 @@ async fn launch_instance(
         .unwrap_or(false);
 
     use hmcl_core::settings::instance_game_settings::{
-        JavaSelectionType, LauncherVisibility, PROPERTY_JAVA_TYPE, PROPERTY_LAUNCHER_VISIBILITY,
+        JavaSelectionType, PROPERTY_JAVA_TYPE, PROPERTY_LAUNCHER_VISIBILITY,
     };
     let instance_settings = hmcl_core::settings::instance_game_settings::load(&repo, &version.id);
     let recommended_java_major = version.java_version.as_ref().map(|java| java.major_version);
     let visibility = if instance_settings.is_overridden(PROPERTY_LAUNCHER_VISIBILITY) {
         instance_settings.effective_launcher_visibility()
     } else {
-        match global_preset.and_then(|preset| preset.launcher_visibility.as_deref()) {
-            Some("CLOSE") => LauncherVisibility::Close,
-            Some("HIDE") => LauncherVisibility::Hide,
-            Some("HIDE_AND_REOPEN") => LauncherVisibility::HideAndReopen,
-            _ => LauncherVisibility::Keep,
-        }
+        launcher_visibility_from_name(
+            global_preset.and_then(|preset| preset.launcher_visibility.as_deref()),
+        )
     };
     let java_override = if instance_settings.is_overridden(PROPERTY_JAVA_TYPE) {
         match instance_settings
@@ -4715,43 +4766,22 @@ async fn launch_instance(
     }
 }
 
-/// 对应 Java `LauncherVisibility`：`before_launch=true` 是进程刚起来之前调一次，
-/// `before_launch=false` 是进程退出后（或者启动失败）调一次。两处简化：
-/// - `Close` 目前跟 `Hide` 表现一样都是"藏起来"——真启动器选 Close 是连主进程
-///   一起退出，这里没有那么做，因为 GUI 唯一的事件循环就是这个窗口自己的，
-///   退出会直接干掉整个进程，把还没跑完的游戏子进程一起带走，代价太大，不值得
-///   为了这一个冷门选项冒这个险；先做成"隐藏但保留进程"，等真的有人抱怨再改。
-/// - `Hide` 跟 `HideAndReopen` 现在表现完全一样（退出后都会重新显示）——没有
-///   核实到 Java 版 `Hide`"只在失败时重新显示、正常退出后是不是保持隐藏"这个
-///   细节的准确语义，两者收敛成同一种更直观的行为（游戏退出/失败都会显示）
-///   比猜一个可能猜错的区分更安全。
 fn apply_launcher_visibility(
     ui_weak: &slint::Weak<AppWindow>,
-    visibility: hmcl_core::settings::instance_game_settings::LauncherVisibility,
+    visibility: LauncherVisibility,
     before_launch: bool,
 ) {
-    use hmcl_core::settings::instance_game_settings::LauncherVisibility;
     let ui_weak = ui_weak.clone();
     let _ = ui_weak.upgrade_in_event_loop(move |ui| {
         let window = ui.window();
         match (visibility, before_launch) {
             (LauncherVisibility::Keep, _) => {}
-            (
-                LauncherVisibility::Close
-                | LauncherVisibility::Hide
-                | LauncherVisibility::HideAndReopen,
-                true,
-            ) => {
-                let _ = window.hide();
+            (LauncherVisibility::Minimize, true) => window.set_minimized(true),
+            (LauncherVisibility::Minimize, false) => window.set_minimized(false),
+            (LauncherVisibility::Close, true) => {
+                let _ = slint::quit_event_loop();
             }
-            (
-                LauncherVisibility::Close
-                | LauncherVisibility::Hide
-                | LauncherVisibility::HideAndReopen,
-                false,
-            ) => {
-                let _ = window.show();
-            }
+            (LauncherVisibility::Close, false) => {}
         }
     });
 }
@@ -5920,6 +5950,31 @@ fn main() -> anyhow::Result<()> {
     let mod_search_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let mod_detail_state = Arc::new(Mutex::new(ModDetailState::default()));
     let instance_content_cache: InstanceContentCache = Arc::new(Mutex::new(HashMap::new()));
+    {
+        let ui_weak = ui.as_weak();
+        let handle = handle.clone();
+        let instance_content_cache = instance_content_cache.clone();
+        ui.on_clear_download_cache(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            if ui.get_cache_clear_loading() {
+                return;
+            }
+            ui.set_cache_clear_loading(true);
+            let instance_content_cache = instance_content_cache.clone();
+            spawn_blocking_then(
+                &handle,
+                ui_weak.clone(),
+                clear_download_caches,
+                move |ui, result| {
+                    ui.set_cache_clear_loading(false);
+                    instance_content_cache.lock().unwrap().clear();
+                    if let Err(error) = result {
+                        ui.set_status_text(format!("清除缓存失败: {error}").into());
+                    }
+                },
+            );
+        });
+    }
     {
         let ui_weak = ui.as_weak();
         let handle = handle.clone();
@@ -7771,6 +7826,40 @@ mod tests {
             suggested_game_directory_name(Path::new("profiles/Modded")),
             "Modded"
         );
+    }
+
+    #[test]
+    fn cache_cleanup_removes_only_the_supplied_directories() {
+        let root = std::env::temp_dir().join(format!("hmcl-gui-cache-{}", uuid::Uuid::now_v7()));
+        let game_cache = root.join(".hmcl-rs-cache");
+        let launcher_cache = root.join("cache");
+        let preserved = root.join("versions");
+        for directory in [&game_cache, &launcher_cache, &preserved] {
+            std::fs::create_dir_all(directory).unwrap();
+            std::fs::write(directory.join("data"), b"cache").unwrap();
+        }
+
+        clear_cache_directories(vec![game_cache.clone(), launcher_cache.clone()]).unwrap();
+
+        assert!(!game_cache.exists());
+        assert!(!launcher_cache.exists());
+        assert!(preserved.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn launcher_visibility_options_migrate_hidden_modes() {
+        assert_eq!(
+            launcher_visibility_from_name(Some("HIDE")),
+            LauncherVisibility::Minimize
+        );
+        assert_eq!(
+            launcher_visibility_from_name(Some("HIDE_AND_REOPEN")),
+            LauncherVisibility::Minimize
+        );
+        assert_eq!(launcher_visibility_name(0), "KEEP");
+        assert_eq!(launcher_visibility_name(1), "MINIMIZE");
+        assert_eq!(launcher_visibility_name(2), "CLOSE");
     }
 
     #[test]
