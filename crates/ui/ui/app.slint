@@ -1884,6 +1884,7 @@ export component AppWindow inherits Window {
         : @image-url("assets/quilt.png"))));
 
     in-out property <bool> show-install-progress: false;
+    property <duration> install-progress-frame: root.show-install-progress && !root.install-succeeded ? animation-tick() : 0ms;
     in-out property <bool> install-succeeded: false;
     in-out property <bool> install-return-to-download-list: false;
     in property <string> install-title: "安装新游戏";
@@ -2285,6 +2286,7 @@ export component AppWindow inherits Window {
     callback start-install(string, string, int, string);
     callback install-instance-loader(int, string);
     callback cancel-install();
+    callback install-progress-frame-tick();
     callback derive-offline-uuid(string) -> string;
     callback valid-uuid(string) -> bool;
 
@@ -2561,6 +2563,11 @@ export component AppWindow inherits Window {
             install-progress-show-frame.stop();
             root.install-progress-dialog-visible = false;
             install-progress-close-finished.start();
+        }
+    }
+    changed install-progress-frame => {
+        if root.show-install-progress {
+            root.install-progress-frame-tick();
         }
     }
     install-progress-show-frame := Timer {

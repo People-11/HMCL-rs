@@ -1536,6 +1536,33 @@ fn set_mod_detail_rows(ui: &AppWindow, rows: Vec<ModVersionRow>) {
     }
 }
 
+fn update_mod_detail_expansion(
+    ui: &AppWindow,
+    previous: &BTreeSet<String>,
+    expanded: &BTreeSet<String>,
+) {
+    let changed = previous
+        .symmetric_difference(expanded)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let model = ui.get_mod_detail_versions();
+    let Some(rows) = model
+        .as_any()
+        .downcast_ref::<slint::VecModel<ModVersionRow>>()
+    else {
+        return;
+    };
+    for index in 0..rows.row_count() {
+        let Some(mut row) = rows.row_data(index) else {
+            continue;
+        };
+        if changed.contains(row.game_version.as_str()) {
+            row.expanded = expanded.contains(row.game_version.as_str());
+            rows.set_row_data(index, row);
+        }
+    }
+}
+
 async fn run_mod_search(
     ui_weak: slint::Weak<AppWindow>,
     game_dir: PathBuf,
@@ -2001,6 +2028,23 @@ fn pick_files_then(
         };
         let paths: Vec<PathBuf> = files.iter().map(|file| file.path().to_path_buf()).collect();
         let _ = ui_weak.upgrade_in_event_loop(move |ui| then(&ui, paths));
+    });
+}
+
+fn spawn_blocking_then<T>(
+    handle: &tokio::runtime::Handle,
+    ui_weak: slint::Weak<AppWindow>,
+    operation: impl FnOnce() -> Result<T, String> + Send + 'static,
+    complete: impl FnOnce(AppWindow, Result<T, String>) + Send + 'static,
+) where
+    T: Send + 'static,
+{
+    handle.spawn(async move {
+        let result = tokio::task::spawn_blocking(operation)
+            .await
+            .map_err(|error| format!("后台任务失败: {error}"))
+            .and_then(|result| result);
+        let _ = ui_weak.upgrade_in_event_loop(move |ui| complete(ui, result));
     });
 }
 
@@ -3935,6 +3979,25 @@ fn push_install_speed(ui_weak: &slint::Weak<AppWindow>, progress: &mut InstallPr
     let _ = ui_weak.upgrade_in_event_loop(move |ui| ui.set_install_speed_text(speed.into()));
 }
 
+#[derive(Clone)]
+struct UiFrameClock(tokio::sync::watch::Sender<()>);
+
+impl Default for UiFrameClock {
+    fn default() -> Self {
+        Self(tokio::sync::watch::channel(()).0)
+    }
+}
+
+impl UiFrameClock {
+    fn tick(&self) {
+        self.0.send_replace(());
+    }
+
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<()> {
+        self.0.subscribe()
+    }
+}
+
 fn show_modpack_install_progress(
     ui: &AppWindow,
     instance_id: &str,
@@ -3953,6 +4016,7 @@ fn show_modpack_install_progress(
 
 async fn drive_install_progress<F, T, E>(
     ui_weak: slint::Weak<AppWindow>,
+    frame_clock: UiFrameClock,
     mut progress: InstallProgress,
     mut events: tokio::sync::mpsc::UnboundedReceiver<ProgressEvent>,
     operation: F,
@@ -3962,9 +4026,11 @@ where
 {
     push_install_progress(&ui_weak, &progress);
     push_install_speed(&ui_weak, &mut progress);
-    let mut ticker = tokio::time::interval(Duration::from_secs(1));
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    ticker.tick().await;
+    let mut frames = frame_clock.subscribe();
+    let mut speed_ticker = tokio::time::interval(Duration::from_secs(1));
+    speed_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    speed_ticker.tick().await;
+    let mut progress_dirty = false;
     tokio::pin!(operation);
 
     let result = loop {
@@ -3972,9 +4038,16 @@ where
             result = &mut operation => break result,
             Some(event) = events.recv() => {
                 progress.apply(event);
-                push_install_progress(&ui_weak, &progress);
+                while let Ok(event) = events.try_recv() {
+                    progress.apply(event);
+                }
+                progress_dirty = true;
             },
-            _ = ticker.tick() => push_install_speed(&ui_weak, &mut progress),
+            _ = frames.changed(), if progress_dirty => {
+                push_install_progress(&ui_weak, &progress);
+                progress_dirty = false;
+            },
+            _ = speed_ticker.tick() => push_install_speed(&ui_weak, &mut progress),
         }
     };
     while let Ok(event) = events.try_recv() {
@@ -3982,32 +4055,18 @@ where
     }
     if result.is_ok() {
         progress.finish();
-        push_install_progress(&ui_weak, &progress);
-        push_install_speed(&ui_weak, &mut progress);
     }
+    push_install_progress(&ui_weak, &progress);
+    push_install_speed(&ui_weak, &mut progress);
     result
 }
 
 fn push_java_install_progress(
     ui_weak: &slint::Weak<AppWindow>,
-    active_files: &Arc<Mutex<BTreeMap<PathBuf, FileProgress>>>,
+    active_files: &BTreeMap<PathBuf, FileProgress>,
     progress: hmcl_core::download::mojang_java::MojangJavaProgress,
 ) {
     let finished = progress.total_files > 0 && progress.completed_files >= progress.total_files;
-    let mut active_files = active_files.lock().unwrap();
-    let path = PathBuf::from(&progress.path);
-    if progress.finished {
-        active_files.remove(&path);
-    } else {
-        active_files.insert(
-            path,
-            FileProgress {
-                downloaded: progress.downloaded,
-                total: Some(progress.total_bytes),
-                updated: Instant::now(),
-            },
-        );
-    }
     let stages = vec![InstallStageRow {
         label: "下载并安装 Java".into(),
         done: progress.completed_files as i32,
@@ -4026,7 +4085,6 @@ fn push_java_install_progress(
             total: file.total.unwrap_or(0) as f32,
         })
         .collect();
-    drop(active_files);
     let detail = format!(
         "{}/{} 个文件",
         progress.completed_files, progress.total_files
@@ -4037,6 +4095,69 @@ fn push_java_install_progress(
         ui.set_install_active_files(slint::ModelRc::new(slint::VecModel::from(files)));
         ui.set_install_speed_text(detail.into());
     });
+}
+
+fn apply_java_install_progress(
+    active_files: &mut BTreeMap<PathBuf, FileProgress>,
+    latest: &mut Option<hmcl_core::download::mojang_java::MojangJavaProgress>,
+    progress: hmcl_core::download::mojang_java::MojangJavaProgress,
+) {
+    let path = PathBuf::from(&progress.path);
+    if progress.finished {
+        active_files.remove(&path);
+    } else {
+        active_files.insert(
+            path,
+            FileProgress {
+                downloaded: progress.downloaded,
+                total: Some(progress.total_bytes),
+                updated: Instant::now(),
+            },
+        );
+    }
+    *latest = Some(progress);
+}
+
+async fn drive_java_install_progress<F, T, E>(
+    ui_weak: slint::Weak<AppWindow>,
+    frame_clock: UiFrameClock,
+    mut events: tokio::sync::mpsc::UnboundedReceiver<
+        hmcl_core::download::mojang_java::MojangJavaProgress,
+    >,
+    operation: F,
+) -> Result<T, E>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+{
+    let mut active_files = BTreeMap::new();
+    let mut latest = None;
+    let mut dirty = false;
+    let mut frames = frame_clock.subscribe();
+    tokio::pin!(operation);
+
+    let result = loop {
+        tokio::select! {
+            result = &mut operation => break result,
+            Some(progress) = events.recv() => {
+                apply_java_install_progress(&mut active_files, &mut latest, progress);
+                while let Ok(progress) = events.try_recv() {
+                    apply_java_install_progress(&mut active_files, &mut latest, progress);
+                }
+                dirty = true;
+            },
+            _ = frames.changed(), if dirty => {
+                push_java_install_progress(&ui_weak, &active_files, latest.clone().unwrap());
+                dirty = false;
+            },
+        }
+    };
+    while let Ok(progress) = events.try_recv() {
+        apply_java_install_progress(&mut active_files, &mut latest, progress);
+    }
+    if let Some(progress) = latest {
+        push_java_install_progress(&ui_weak, &active_files, progress);
+    }
+    result
 }
 
 fn loader_kind(index: i32) -> Option<LoaderKind> {
@@ -4067,6 +4188,7 @@ fn loader_kind_index(kind: LoaderKind) -> i32 {
 /// 才用得上的字段（离线用户名、内存上限），纯装的时候全是假值。
 async fn install_remote_version(
     ui_weak: slint::Weak<AppWindow>,
+    frame_clock: UiFrameClock,
     game_dir: PathBuf,
     version_id: String,
     instance_id: String,
@@ -4106,7 +4228,8 @@ async fn install_remote_version(
             .as_ref()
             .map(|selection| selection.kind.display_name()),
     );
-    let report = drive_install_progress(ui_weak.clone(), progress, rx, install).await?;
+    let report =
+        drive_install_progress(ui_weak.clone(), frame_clock, progress, rx, install).await?;
 
     let lib_failed = report
         .library_results
@@ -4162,6 +4285,7 @@ async fn install_remote_version(
 
 async fn install_instance_loader(
     ui_weak: slint::Weak<AppWindow>,
+    frame_clock: UiFrameClock,
     game_dir: PathBuf,
     instance_id: String,
     selection: LoaderSelection,
@@ -4187,7 +4311,8 @@ async fn install_instance_loader(
         Some(&tx),
     );
     let progress = InstallProgress::new(&instance_id, Some(selection.kind.display_name()));
-    let report = drive_install_progress(ui_weak.clone(), progress, rx, install).await?;
+    let report =
+        drive_install_progress(ui_weak.clone(), frame_clock, progress, rx, install).await?;
 
     let failed = report
         .library_results
@@ -4503,18 +4628,14 @@ async fn launch_instance(
             let mut process = launched.process;
             let stdout = process.child.stdout.take().unwrap();
             let stderr = process.child.stderr.take().unwrap();
-            let stdout_ui_weak = ui_weak.clone();
-            let stderr_ui_weak = ui_weak.clone();
             let recent_logs = Arc::new(Mutex::new(VecDeque::new()));
             let stdout_logs = recent_logs.clone();
             let stderr_logs = recent_logs.clone();
             let stdout_task = tokio::spawn(launch::pump_lines(stdout, move |line| {
                 retain_recent_game_log(&stdout_logs, &line);
-                set_status(&stdout_ui_weak, line)
             }));
             let stderr_task = tokio::spawn(launch::pump_lines(stderr, move |line| {
                 retain_recent_game_log(&stderr_logs, &line);
-                set_status(&stderr_ui_weak, line)
             }));
 
             let mut cancelled = false;
@@ -4716,6 +4837,11 @@ fn attach_parent_console() {}
 fn main() -> anyhow::Result<()> {
     attach_parent_console();
     let ui = AppWindow::new()?;
+    let frame_clock = UiFrameClock::default();
+    {
+        let frame_clock = frame_clock.clone();
+        ui.on_install_progress_frame_tick(move || frame_clock.tick());
+    }
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(16 * 1024 * 1024)
@@ -4855,6 +4981,7 @@ fn main() -> anyhow::Result<()> {
         let ui_weak = ui.as_weak();
         let handle = handle.clone();
         let install_task = install_task.clone();
+        let frame_clock = frame_clock.clone();
         ui.on_download_java(move |index| {
             let Some(ui) = ui_weak.upgrade() else { return };
             if ui.get_java_download_loading() {
@@ -4895,23 +5022,24 @@ fn main() -> anyhow::Result<()> {
             ui.set_show_install_progress(true);
 
             let ui_weak = ui_weak.clone();
+            let frame_clock = frame_clock.clone();
             let task = handle.spawn(async move {
                 let client = http_client();
                 let provider = configured_download_provider(false);
                 let install_root = launcher_data_dir().join("java");
-                let progress_ui = ui_weak.clone();
-                let active_files = Arc::new(Mutex::new(BTreeMap::new()));
-                let progress_files = active_files.clone();
-                let result = hmcl_core::download::mojang_java::install_mojang_java_with_progress(
+                let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel();
+                let install = hmcl_core::download::mojang_java::install_mojang_java_with_progress(
                     &client,
                     &provider,
                     &install_root,
                     component,
                     move |progress| {
-                        push_java_install_progress(&progress_ui, &progress_files, progress)
+                        let _ = progress_tx.send(progress);
                     },
-                )
-                .await;
+                );
+                let result =
+                    drive_java_install_progress(ui_weak.clone(), frame_clock, progress_rx, install)
+                        .await;
                 let _ = ui_weak.upgrade_in_event_loop(move |ui| {
                     ui.set_java_download_loading(false);
                     match result {
@@ -5989,10 +6117,10 @@ fn main() -> anyhow::Result<()> {
         ui.on_toggle_mod_version_group(move |game_version| {
             let Some(ui) = ui_weak.upgrade() else { return };
             let mut state = mod_detail_state.lock().unwrap();
+            let previous = state.expanded.clone();
             let game_version = game_version.to_string();
             toggle_mod_detail_group(&mut state.expanded, game_version);
-            let rows = mod_detail_rows(&state);
-            set_mod_detail_rows(&ui, rows);
+            update_mod_detail_expansion(&ui, &previous, &state.expanded);
         });
     }
 
@@ -6001,6 +6129,7 @@ fn main() -> anyhow::Result<()> {
         let handle = handle.clone();
         let mod_detail_state = mod_detail_state.clone();
         let install_task = install_task.clone();
+        let frame_clock = frame_clock.clone();
         ui.on_install_mod_version(move |version_id, file_name| {
             let game_dir = resolve_game_dir();
             let Some(ui) = ui_weak.upgrade() else { return };
@@ -6034,6 +6163,7 @@ fn main() -> anyhow::Result<()> {
                 let progress = show_modpack_install_progress(&ui, &instance_id, true);
                 let ui_weak = ui_weak.clone();
                 let game_dir = game_dir.clone();
+                let frame_clock = frame_clock.clone();
                 let task = handle.spawn(async move {
                     let client = http_client();
                     let provider = configured_download_provider(false);
@@ -6056,7 +6186,8 @@ fn main() -> anyhow::Result<()> {
                         Some(&tx),
                     );
                     let result =
-                        drive_install_progress(ui_weak.clone(), progress, rx, import).await;
+                        drive_install_progress(ui_weak.clone(), frame_clock, progress, rx, import)
+                            .await;
                     let _ = ui_weak.upgrade_in_event_loop(move |ui| {
                         finish_modpack_import(&ui, &game_dir, &instance_id, result)
                     });
@@ -6201,6 +6332,7 @@ fn main() -> anyhow::Result<()> {
         let ui_weak = ui.as_weak();
         let handle = handle.clone();
         let install_task = install_task.clone();
+        let frame_clock = frame_clock.clone();
         ui.on_import_modpack_from_file(move || {
             let game_dir = resolve_game_dir();
             let Some(ui) = ui_weak.upgrade() else { return };
@@ -6221,6 +6353,7 @@ fn main() -> anyhow::Result<()> {
 
             let ui_weak = ui_weak.clone();
             let game_dir = game_dir.clone();
+            let frame_clock = frame_clock.clone();
             let task = handle.spawn(async move {
                 let client = http_client();
                 let provider = configured_download_provider(false);
@@ -6242,7 +6375,9 @@ fn main() -> anyhow::Result<()> {
                     env,
                     Some(&tx),
                 );
-                let result = drive_install_progress(ui_weak.clone(), progress, rx, import).await;
+                let result =
+                    drive_install_progress(ui_weak.clone(), frame_clock, progress, rx, import)
+                        .await;
                 let _ = ui_weak.upgrade_in_event_loop(move |ui| {
                     finish_modpack_import(&ui, &game_dir, &instance_id, result)
                 });
@@ -6257,6 +6392,7 @@ fn main() -> anyhow::Result<()> {
         let ui_weak = ui.as_weak();
         let handle = handle.clone();
         let install_task = install_task.clone();
+        let frame_clock = frame_clock.clone();
         ui.on_import_modpack_from_url(move || {
             let game_dir = resolve_game_dir();
             let Some(ui) = ui_weak.upgrade() else { return };
@@ -6277,6 +6413,7 @@ fn main() -> anyhow::Result<()> {
 
             let ui_weak = ui_weak.clone();
             let game_dir = game_dir.clone();
+            let frame_clock = frame_clock.clone();
             let task = handle.spawn(async move {
                 let client = http_client();
                 let provider = configured_download_provider(false);
@@ -6298,7 +6435,9 @@ fn main() -> anyhow::Result<()> {
                     env,
                     Some(&tx),
                 );
-                let result = drive_install_progress(ui_weak.clone(), progress, rx, import).await;
+                let result =
+                    drive_install_progress(ui_weak.clone(), frame_clock, progress, rx, import)
+                        .await;
                 let _ = ui_weak.upgrade_in_event_loop(move |ui| {
                     finish_modpack_import(&ui, &game_dir, &instance_id, result)
                 });
@@ -6313,6 +6452,7 @@ fn main() -> anyhow::Result<()> {
         let ui_weak = ui.as_weak();
         let handle = handle.clone();
         let install_task = install_task.clone();
+        let frame_clock = frame_clock.clone();
         ui.on_start_install(
             move |version_id, instance_id, loader_kind_index, loader_version| {
                 let game_dir = resolve_game_dir();
@@ -6353,9 +6493,11 @@ fn main() -> anyhow::Result<()> {
                 ui.set_install_return_to_download_list(false);
                 ui.set_show_install_progress(true);
 
+                let frame_clock = frame_clock.clone();
                 let task = handle.spawn(async move {
                     match install_remote_version(
                         ui_weak.clone(),
+                        frame_clock,
                         game_dir.clone(),
                         version_id,
                         instance_id.clone(),
@@ -6390,6 +6532,7 @@ fn main() -> anyhow::Result<()> {
         let ui_weak = ui.as_weak();
         let install_task = install_task.clone();
         let handle = handle.clone();
+        let frame_clock = frame_clock.clone();
         ui.on_install_instance_loader(move |loader_kind_index, loader_version| {
             let game_dir = resolve_game_dir();
             let Some(kind) = loader_kind(loader_kind_index) else {
@@ -6414,9 +6557,11 @@ fn main() -> anyhow::Result<()> {
 
             let ui_weak = ui_weak.clone();
             let game_dir = game_dir.clone();
+            let frame_clock = frame_clock.clone();
             let task = handle.spawn(async move {
                 match install_instance_loader(
                     ui_weak.clone(),
+                    frame_clock,
                     game_dir.clone(),
                     instance_id,
                     selection,
@@ -6483,36 +6628,53 @@ fn main() -> anyhow::Result<()> {
 
     {
         let ui_weak = ui.as_weak();
+        let handle = handle.clone();
         ui.on_duplicate_instance(move |id| {
             let game_dir = resolve_game_dir();
             let Some(ui) = ui_weak.upgrade() else { return };
-            match duplicate_instance(&game_dir, &id) {
-                Ok(new_id) => {
-                    ui.set_status_text(format!("已复制为 {new_id}").into());
-                    refresh_instances(&ui, &game_dir, &ui.get_filter_text());
-                    restore_selected_instance(&ui);
-                }
-                Err(e) => ui.set_status_text(format!("复制失败: {e}").into()),
-            }
+            ui.set_status_text(format!("正在复制 {id}…").into());
+            let refresh_dir = game_dir.clone();
+            spawn_blocking_then(
+                &handle,
+                ui_weak.clone(),
+                move || duplicate_instance(&game_dir, &id),
+                move |ui, result| match result {
+                    Ok(new_id) => {
+                        ui.set_status_text(format!("已复制为 {new_id}").into());
+                        refresh_instances(&ui, &refresh_dir, &ui.get_filter_text());
+                        restore_selected_instance(&ui);
+                    }
+                    Err(e) => ui.set_status_text(format!("复制失败: {e}").into()),
+                },
+            );
         });
     }
 
     {
         let ui_weak = ui.as_weak();
+        let handle = handle.clone();
         ui.on_delete_instance(move |id| {
             let game_dir = resolve_game_dir();
             let Some(ui) = ui_weak.upgrade() else { return };
-            match delete_instance(&game_dir, &id) {
-                Ok(()) => {
-                    ui.set_status_text(format!("已删除 {id}").into());
-                    refresh_instances(&ui, &game_dir, &ui.get_filter_text());
-                    restore_selected_instance(&ui);
-                    if ui.get_settings_instance_id() == id {
-                        ui.invoke_show_instance_list();
+            ui.set_status_text(format!("正在删除 {id}…").into());
+            let refresh_dir = game_dir.clone();
+            let deleted_id = id.to_string();
+            spawn_blocking_then(
+                &handle,
+                ui_weak.clone(),
+                move || delete_instance(&game_dir, &id),
+                move |ui, result| match result {
+                    Ok(()) => {
+                        ui.set_status_text(format!("已删除 {deleted_id}").into());
+                        refresh_instances(&ui, &refresh_dir, &ui.get_filter_text());
+                        restore_selected_instance(&ui);
+                        if ui.get_settings_instance_id().as_str() == deleted_id {
+                            ui.invoke_show_instance_list();
+                        }
                     }
-                }
-                Err(e) => ui.set_status_text(format!("删除失败: {e}").into()),
-            }
+                    Err(e) => ui.set_status_text(format!("删除失败: {e}").into()),
+                },
+            );
         });
     }
 
@@ -6629,38 +6791,50 @@ fn main() -> anyhow::Result<()> {
     }
     {
         let ui_weak = ui.as_weak();
+        let handle = handle.clone();
         ui.on_delete_instance_content(move |kind, file_name| {
             let game_dir = resolve_game_dir();
             let Some(ui) = ui_weak.upgrade() else { return };
             let instance_id = ui.get_settings_instance_id().to_string();
-            let result = if kind == 1 {
-                LoaderKind::from_slug(&file_name)
-                    .ok_or_else(|| "未知的加载器".to_string())
-                    .and_then(|loader| {
-                        game_install::remove_loader(
-                            &GameRepository::new(&game_dir),
-                            &instance_id,
-                            loader,
-                        )
-                        .map_err(|e| e.to_string())?;
-                        sync_instance_loader_name(&game_dir, &instance_id, None)
-                    })
-            } else {
-                delete_instance_content(&game_dir, &instance_id, kind, &file_name)
-                    .map(|_| instance_id.clone())
-            };
-            match result {
-                Err(e) => ui.set_status_text(format!("删除失败: {e}").into()),
-                Ok(new_id) if kind == 1 => {
-                    ui.set_settings_instance_id(new_id.clone().into());
-                    set_selected_instance(&new_id);
-                    ui.set_status_text("加载器已卸载".into());
-                    refresh_instances(&ui, &game_dir, &ui.get_filter_text());
-                    restore_selected_instance(&ui);
-                }
-                Ok(_) => {}
-            }
-            ui.invoke_refresh_instance_content(kind);
+            let file_name = file_name.to_string();
+            ui.set_status_text("正在删除…".into());
+            let refresh_dir = game_dir.clone();
+            spawn_blocking_then(
+                &handle,
+                ui_weak.clone(),
+                move || {
+                    if kind == 1 {
+                        LoaderKind::from_slug(&file_name)
+                            .ok_or_else(|| "未知的加载器".to_string())
+                            .and_then(|loader| {
+                                game_install::remove_loader(
+                                    &GameRepository::new(&game_dir),
+                                    &instance_id,
+                                    loader,
+                                )
+                                .map_err(|e| e.to_string())?;
+                                sync_instance_loader_name(&game_dir, &instance_id, None)
+                            })
+                    } else {
+                        delete_instance_content(&game_dir, &instance_id, kind, &file_name)
+                            .map(|_| instance_id)
+                    }
+                },
+                move |ui, result| {
+                    match result {
+                        Err(e) => ui.set_status_text(format!("删除失败: {e}").into()),
+                        Ok(new_id) if kind == 1 => {
+                            ui.set_settings_instance_id(new_id.clone().into());
+                            set_selected_instance(&new_id);
+                            ui.set_status_text("加载器已卸载".into());
+                            refresh_instances(&ui, &refresh_dir, &ui.get_filter_text());
+                            restore_selected_instance(&ui);
+                        }
+                        Ok(_) => {}
+                    }
+                    ui.invoke_refresh_instance_content(kind);
+                },
+            );
         });
     }
     {
@@ -6682,24 +6856,31 @@ fn main() -> anyhow::Result<()> {
                 .set_directory(initial_dir)
                 .add_filter(filter, extensions);
             let game_dir = game_dir.clone();
+            let task_handle = handle.clone();
+            let result_ui = ui_weak.clone();
             pick_files_then(
                 ui_weak.clone(),
                 &handle,
                 dialog,
                 "已取消本地安装",
-                move |ui, sources| match install_local_instance_content(
-                    &game_dir,
-                    &instance_id,
-                    kind,
-                    &sources,
-                ) {
-                    Ok(count) => {
-                        ui.set_status_text(format!("已从本地安装 {count} 个文件").into());
-                        ui.invoke_refresh_instance_content(kind);
-                    }
-                    Err(error) => {
-                        ui.set_status_text(format!("本地安装失败: {error}").into());
-                    }
+                move |ui, sources| {
+                    ui.set_status_text("正在复制本地文件…".into());
+                    spawn_blocking_then(
+                        &task_handle,
+                        result_ui,
+                        move || {
+                            install_local_instance_content(&game_dir, &instance_id, kind, &sources)
+                        },
+                        move |ui, result| match result {
+                            Ok(count) => {
+                                ui.set_status_text(format!("已从本地安装 {count} 个文件").into());
+                                ui.invoke_refresh_instance_content(kind);
+                            }
+                            Err(error) => {
+                                ui.set_status_text(format!("本地安装失败: {error}").into())
+                            }
+                        },
+                    );
                 },
             );
         });
@@ -6838,22 +7019,28 @@ fn main() -> anyhow::Result<()> {
                 .add_filter("世界压缩包", &["zip"]);
             ui.set_status_text("请选择世界压缩包保存位置…".into());
             let ui_weak = ui_weak.clone();
+            let task_handle = handle.clone();
             handle.spawn(async move {
                 let Some(file) = dialog.save_file().await else {
                     set_status(&ui_weak, "已取消导出世界".to_string());
                     return;
                 };
                 let output = with_extension(file.path(), "zip");
-                let result = world.export(&output);
-                let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-                    ui.set_status_text(
-                        match result {
-                            Ok(()) => format!("已导出世界到 {}", output.display()),
-                            Err(e) => format!("导出世界失败: {e}"),
-                        }
-                        .into(),
-                    );
-                });
+                let completed_output = output.clone();
+                spawn_blocking_then(
+                    &task_handle,
+                    ui_weak,
+                    move || world.export(&output).map_err(|error| error.to_string()),
+                    move |ui, result| {
+                        ui.set_status_text(
+                            match result {
+                                Ok(()) => format!("已导出世界到 {}", completed_output.display()),
+                                Err(e) => format!("导出世界失败: {e}"),
+                            }
+                            .into(),
+                        );
+                    },
+                );
             });
         });
     }
@@ -6870,38 +7057,63 @@ fn main() -> anyhow::Result<()> {
                 .add_filter("世界压缩包", &["zip"]);
             ui.set_status_text("请选择要导入的世界压缩包…".into());
             let game_dir = game_dir.clone();
+            let task_handle = handle.clone();
+            let result_ui = ui_weak.clone();
             pick_files_then(
                 ui_weak.clone(),
                 &handle,
                 dialog,
                 "已取消导入世界",
                 move |ui, paths| {
-                    let Some(source) = paths.first() else { return };
-                    match import_world(&game_dir, &instance_id, source) {
-                        Ok(name) => ui.set_status_text(format!("已导入世界「{name}」").into()),
-                        Err(e) => ui.set_status_text(format!("导入世界失败: {e}").into()),
-                    }
-                    ui.invoke_refresh_instance_content(5);
+                    let Some(source) = paths.first().cloned() else {
+                        return;
+                    };
+                    ui.set_status_text("正在导入世界…".into());
+                    spawn_blocking_then(
+                        &task_handle,
+                        result_ui,
+                        move || import_world(&game_dir, &instance_id, &source),
+                        move |ui, result| {
+                            match result {
+                                Ok(name) => {
+                                    ui.set_status_text(format!("已导入世界「{name}」").into())
+                                }
+                                Err(e) => ui.set_status_text(format!("导入世界失败: {e}").into()),
+                            }
+                            ui.invoke_refresh_instance_content(5);
+                        },
+                    );
                 },
             );
         });
     }
     {
         let ui_weak = ui.as_weak();
+        let handle = handle.clone();
         ui.on_duplicate_world(move |folder_name, new_name| {
             let game_dir = resolve_game_dir();
             let Some(ui) = ui_weak.upgrade() else { return };
             let instance_id = ui.get_settings_instance_id().to_string();
-            let result = open_world(&game_dir, &instance_id, &folder_name)
-                .and_then(|world| world.copy_to(&new_name).map_err(|e| e.to_string()));
-            ui.set_status_text(
-                match result {
-                    Ok(_) => format!("已复制世界到「{new_name}」"),
-                    Err(e) => format!("复制世界失败: {e}"),
-                }
-                .into(),
+            ui.set_status_text(format!("正在复制世界到「{new_name}」…").into());
+            let completed_name = new_name.to_string();
+            spawn_blocking_then(
+                &handle,
+                ui_weak.clone(),
+                move || {
+                    open_world(&game_dir, &instance_id, &folder_name)
+                        .and_then(|world| world.copy_to(&new_name).map_err(|e| e.to_string()))
+                },
+                move |ui, result| {
+                    ui.set_status_text(
+                        match result {
+                            Ok(_) => format!("已复制世界到「{completed_name}」"),
+                            Err(e) => format!("复制世界失败: {e}"),
+                        }
+                        .into(),
+                    );
+                    ui.invoke_refresh_instance_content(5);
+                },
             );
-            ui.invoke_refresh_instance_content(5);
         });
     }
     {
@@ -6924,18 +7136,30 @@ fn main() -> anyhow::Result<()> {
     }
     {
         let ui_weak = ui.as_weak();
+        let handle = handle.clone();
         ui.on_delete_world(move |folder_name| {
             let game_dir = resolve_game_dir();
             let Some(ui) = ui_weak.upgrade() else { return };
             let instance_id = ui.get_settings_instance_id().to_string();
-            let result = open_world(&game_dir, &instance_id, &folder_name)
-                .and_then(|world| world.delete().map_err(|e| e.to_string()));
-            if let Err(e) = result {
-                ui.set_status_text(format!("删除世界失败: {e}").into());
-            } else {
-                ui.set_status_text(format!("已删除世界「{folder_name}」").into());
-            }
-            ui.invoke_refresh_instance_content(5);
+            ui.set_status_text(format!("正在删除世界「{folder_name}」…").into());
+            let deleted_name = folder_name.to_string();
+            spawn_blocking_then(
+                &handle,
+                ui_weak.clone(),
+                move || {
+                    open_world(&game_dir, &instance_id, &folder_name)
+                        .and_then(|world| world.delete().map_err(|e| e.to_string()))
+                },
+                move |ui, result| {
+                    match result {
+                        Ok(()) => {
+                            ui.set_status_text(format!("已删除世界「{deleted_name}」").into())
+                        }
+                        Err(e) => ui.set_status_text(format!("删除世界失败: {e}").into()),
+                    }
+                    ui.invoke_refresh_instance_content(5);
+                },
+            );
         });
     }
     {
@@ -7113,22 +7337,33 @@ fn main() -> anyhow::Result<()> {
     }
     {
         let ui_weak = ui.as_weak();
+        let handle = handle.clone();
         ui.on_create_world_backup(move || {
             let game_dir = resolve_game_dir();
             let Some(ui) = ui_weak.upgrade() else { return };
             let instance_id = ui.get_settings_instance_id().to_string();
             let folder = ui.get_world_detail_folder().to_string();
             let backups = instance_backups_directory(&game_dir, &instance_id);
-            let result = open_world(&game_dir, &instance_id, &folder)
-                .and_then(|world| world.backup(&backups).map_err(|e| e.to_string()));
-            ui.set_status_text(
-                match result {
-                    Ok(path) => format!("已创建备份 {}", path.display()),
-                    Err(e) => format!("创建备份失败: {e}"),
-                }
-                .into(),
+            ui.set_status_text("正在创建世界备份…".into());
+            let refresh_dir = game_dir.clone();
+            spawn_blocking_then(
+                &handle,
+                ui_weak.clone(),
+                move || {
+                    open_world(&game_dir, &instance_id, &folder)
+                        .and_then(|world| world.backup(&backups).map_err(|e| e.to_string()))
+                },
+                move |ui, result| {
+                    ui.set_status_text(
+                        match result {
+                            Ok(path) => format!("已创建备份 {}", path.display()),
+                            Err(e) => format!("创建备份失败: {e}"),
+                        }
+                        .into(),
+                    );
+                    set_world_backups(&ui, &refresh_dir);
+                },
             );
-            set_world_backups(&ui, &game_dir);
         });
     }
     {
