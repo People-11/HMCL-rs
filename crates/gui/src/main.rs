@@ -3011,6 +3011,32 @@ fn recent_game_log_text(logs: &Arc<Mutex<VecDeque<String>>>, latest_log: &Path) 
     lines.join("\n")
 }
 
+fn crash_log_level(line: &str) -> i32 {
+    let upper = line.to_ascii_uppercase();
+    if upper.contains("/ERROR]")
+        || upper.contains("[ERROR]")
+        || upper.contains("/FATAL]")
+        || upper.contains("[FATAL]")
+        || upper.contains("EXCEPTION")
+        || upper.contains("CAUSED BY:")
+        || upper.contains("PANIC")
+    {
+        4
+    } else if upper.contains("/WARN]") || upper.contains("[WARN]") {
+        3
+    } else if upper.contains("/INFO]") || upper.contains("[INFO]") {
+        2
+    } else if upper.contains("/DEBUG]")
+        || upper.contains("[DEBUG]")
+        || upper.contains("/TRACE]")
+        || upper.contains("[TRACE]")
+    {
+        1
+    } else {
+        0
+    }
+}
+
 fn push_launch_progress(ui_weak: &slint::Weak<AppWindow>, active: usize, detail: String) {
     let labels = [
         "检查并补全游戏文件",
@@ -4509,7 +4535,7 @@ async fn launch_instance(
             let exit_label = match &status {
                 Ok(status) => status
                     .code()
-                    .map(|code| format!("退出代码 {code}"))
+                    .map(|code| code.to_string())
                     .unwrap_or_else(|| status.to_string()),
                 Err(error) => format!("无法读取退出状态: {error}"),
             };
@@ -4525,16 +4551,22 @@ async fn launch_instance(
                 let run_directory = repo.run_directory(&instance_id);
                 let logs_directory = run_directory.join("logs");
                 let log = recent_game_log_text(&recent_logs, &logs_directory.join("latest.log"));
+                let log_lines = log
+                    .lines()
+                    .map(|line| CrashLogLine {
+                        text: line.into(),
+                        level: crash_log_level(line),
+                    })
+                    .collect::<Vec<_>>();
                 let log_folder = if logs_directory.is_dir() {
                     logs_directory
                 } else {
                     run_directory
                 };
-                let instance_name = instance_id.clone();
                 let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-                    ui.set_crash_instance_name(instance_name.into());
                     ui.set_crash_exit_code(exit_label.into());
                     ui.set_crash_log(log.into());
+                    ui.set_crash_log_lines(slint::ModelRc::new(slint::VecModel::from(log_lines)));
                     ui.set_crash_log_folder(log_folder.to_string_lossy().into_owned().into());
                     ui.set_show_crash_dialog(true);
                 });
@@ -4684,7 +4716,10 @@ fn attach_parent_console() {}
 fn main() -> anyhow::Result<()> {
     attach_parent_console();
     let ui = AppWindow::new()?;
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(16 * 1024 * 1024)
+        .build()?;
     let handle = rt.handle().clone();
     let install_task: Rc<RefCell<Option<tokio::task::JoinHandle<()>>>> =
         Rc::new(RefCell::new(None));
@@ -7513,6 +7548,14 @@ mod tests {
         assert_eq!(logs.len(), 600);
         assert_eq!(logs.front().map(String::as_str), Some("line-5"));
         assert_eq!(logs.back().map(String::as_str), Some("line-604"));
+    }
+
+    #[test]
+    fn crash_log_levels_recognize_minecraft_and_java_output() {
+        assert_eq!(crash_log_level("[main/INFO] Starting Minecraft"), 2);
+        assert_eq!(crash_log_level("[Render thread/WARN] Missing texture"), 3);
+        assert_eq!(crash_log_level("java.lang.NullPointerException"), 4);
+        assert_eq!(crash_log_level("Loading resource packs"), 0);
     }
 
     #[test]
