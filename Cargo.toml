@@ -40,11 +40,14 @@ anyhow = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # ponytail: default-features off -> no Skia. Skia has no prebuilt for windows-gnu
 # and needs clang-cl. femtovg (pure Rust + OpenGL) is the only viable renderer here.
-slint = { version = "1", default-features = false, features = [
+# unstable-winit-030 只为了标题栏拖动走系统的 drag_window()（逐帧 set_position 会跟手
+# 抖动）。这个 feature 要求把 slint 钉在同一个小版本上。
+slint = { version = "~1.17", default-features = false, features = [
     "compat-1-2",
     "std",
     "backend-winit",
     "renderer-femtovg",
+    "unstable-winit-030",
 ] }
 
 # app.slint 会被 slint-build 展开成一个 32 MB 的 app.rs（6600 行 .slint -> 约 90 万行

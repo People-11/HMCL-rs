@@ -18,6 +18,8 @@ futures.workspace = true
 chrono.workspace = true
 rfd = { version = "0.15", default-features = false }
 slint.workspace = true
+# 后台解码项目图标用。格式 feature 跟 hmcl-ui 里那份统一，不多编解码器。
+image = { version = "0.25", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5.4.1"

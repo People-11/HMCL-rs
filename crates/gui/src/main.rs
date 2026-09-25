@@ -514,7 +514,7 @@ fn find_java_runtimes() -> Vec<hmcl_core::java::JavaRuntime> {
             runtimes.push(java);
         }
     }
-    if let Ok(java) = hmcl_core::java::find_a_java(None) {
+    for java in hmcl_core::java::find_all_javas() {
         if !runtimes.iter().any(|runtime| runtime.binary == java.binary) {
             runtimes.push(java);
         }
@@ -1375,7 +1375,7 @@ struct PendingModRow {
     description: String,
     downloads: String,
     categories: String,
-    icon_path: Option<PathBuf>,
+    icon: Option<ProjectIcon>,
 }
 
 /// `mod-search-kind`(slint 属性) -> (Modrinth project_type, 装完落在运行目录下
@@ -1446,7 +1446,7 @@ async fn load_project_icon(
     cache_dir: &Path,
     project_id: &str,
     icon_url: Option<&str>,
-) -> Option<PathBuf> {
+) -> Option<ProjectIcon> {
     let icon_url = icon_url?;
     let extension = icon_url
         .split('?')
@@ -1478,7 +1478,51 @@ async fn load_project_icon(
             return None;
         }
     }
-    Some(path)
+    tokio::task::spawn_blocking(move || ProjectIcon::decode(path))
+        .await
+        .ok()
+}
+
+/// 列表里的项目图标。位图在后台线程解码并缩成缩略图，UI 线程只剩一次纹理上传；
+/// 以前在事件循环里 `Image::load_from_path` 整张解码 Modrinth 的 512px 图标，
+/// 结果一到或切到模组页就会卡一下，显存也按原尺寸占。
+#[derive(Clone)]
+enum ProjectIcon {
+    Pixels(slint::SharedPixelBuffer<slint::Rgba8Pixel>),
+    // ponytail: SVG 等 image crate 解不了的，还交给 slint 自己加载（它带 resvg）。
+    Path(PathBuf),
+}
+
+impl ProjectIcon {
+    /// 列表里图标最大 38px，按 2x 屏留余量。
+    const THUMBNAIL_SIZE: u32 = 96;
+
+    fn decode(path: PathBuf) -> Self {
+        let pixels = image::ImageReader::open(&path)
+            .and_then(|reader| reader.with_guessed_format())
+            .ok()
+            .and_then(|reader| reader.decode().ok())
+            .map(|image| {
+                image
+                    .thumbnail(Self::THUMBNAIL_SIZE, Self::THUMBNAIL_SIZE)
+                    .into_rgba8()
+            });
+        match pixels {
+            Some(rgba) => Self::Pixels(slint::SharedPixelBuffer::clone_from_slice(
+                rgba.as_raw(),
+                rgba.width(),
+                rgba.height(),
+            )),
+            None => Self::Path(path),
+        }
+    }
+
+    fn to_image(&self) -> slint::Image {
+        match self {
+            Self::Pixels(pixels) => slint::Image::from_rgba8(pixels.clone()),
+            Self::Path(path) => slint::Image::load_from_path(path).unwrap_or_default(),
+        }
+    }
 }
 
 fn format_modrinth_date(date: &str) -> String {
@@ -1709,7 +1753,7 @@ async fn run_mod_search(
                             .map(|tag| localize_modrinth_tag(tag))
                             .collect::<Vec<_>>()
                             .join("  "),
-                        icon_path: icon,
+                        icon,
                     }
                 }
             }))
@@ -1756,11 +1800,7 @@ async fn run_mod_search(
                         description: row.description.into(),
                         downloads: row.downloads.into(),
                         categories: row.categories.into(),
-                        icon: row
-                            .icon_path
-                            .as_deref()
-                            .and_then(|path| slint::Image::load_from_path(path).ok())
-                            .unwrap_or_default(),
+                        icon: row.icon.map(|icon| icon.to_image()).unwrap_or_default(),
                     })
                     .collect::<Vec<_>>();
                 if page == 0 {
@@ -2929,7 +2969,7 @@ struct PendingInstanceContentRow {
     detail: String,
     enabled: bool,
     directory: bool,
-    icon_path: Option<PathBuf>,
+    icon: Option<ProjectIcon>,
 }
 
 type InstanceContentCache = Arc<Mutex<HashMap<(String, i32), Vec<PendingInstanceContentRow>>>>;
@@ -2961,7 +3001,7 @@ async fn instance_content_rows_online_inner(
             detail: row.detail.to_string(),
             enabled: row.enabled,
             directory: row.directory,
-            icon_path: None,
+            icon: None,
         })
         .collect::<Vec<_>>();
     let context = resolve_instance_context(game_dir, instance_id);
@@ -3006,7 +3046,7 @@ async fn instance_content_rows_online_inner(
                 return (row, false);
             };
 
-            let icon_path = match modrinth::fetch_project(&client, &provider, &current.project_id)
+            let icon = match modrinth::fetch_project(&client, &provider, &current.project_id)
                 .await
             {
                 Ok(project) => {
@@ -3016,7 +3056,7 @@ async fn instance_content_rows_online_inner(
                 Err(_) => None,
             };
             if !check_updates {
-                row.icon_path = icon_path;
+                row.icon = icon;
                 return (row, false);
             }
 
@@ -3038,17 +3078,17 @@ async fn instance_content_rows_online_inner(
             match latest {
                 Ok(latest) if current.id == latest.id => {
                     row.detail = format!("{original_detail} · 已是最新版本");
-                    row.icon_path = icon_path;
+                    row.icon = icon;
                     (row, false)
                 }
                 Ok(latest) => {
                     row.detail = format!("{original_detail} · 可更新至 {}", latest.version_number);
-                    row.icon_path = icon_path;
+                    row.icon = icon;
                     (row, true)
                 }
                 Err(message) => {
                     row.detail = format!("{original_detail} · {message}");
-                    row.icon_path = icon_path;
+                    row.icon = icon;
                     (row, false)
                 }
             }
@@ -3070,9 +3110,9 @@ fn materialize_instance_content_rows(
     rows.into_iter()
         .map(|row| {
             let icon = row
-                .icon_path
-                .as_deref()
-                .and_then(|path| slint::Image::load_from_path(path).ok())
+                .icon
+                .as_ref()
+                .map(ProjectIcon::to_image)
                 .unwrap_or_default();
             InstanceContentRow {
                 file_name: row.file_name.into(),
@@ -3080,7 +3120,7 @@ fn materialize_instance_content_rows(
                 detail: row.detail.into(),
                 enabled: row.enabled,
                 directory: row.directory,
-                online_icon: row.icon_path.is_some(),
+                online_icon: row.icon.is_some(),
                 icon,
             }
         })
@@ -5167,13 +5207,13 @@ fn main() -> anyhow::Result<()> {
 
     {
         let ui_weak = ui.as_weak();
-        ui.on_window_drag(move |dx, dy| {
+        ui.on_window_drag(move || {
+            use slint::winit_030::WinitWindowAccessor;
             let Some(ui) = ui_weak.upgrade() else { return };
-            let window = ui.window();
-            let scale = window.scale_factor();
-            let logical = window.position().to_logical(scale);
-            let moved = slint::LogicalPosition::new(logical.x + dx, logical.y + dy);
-            window.set_position(moved.to_physical(scale));
+            // 交给系统的移动循环：跟手、不抖，不用每个鼠标事件都 set_position 重排一次。
+            ui.window().with_winit_window(|window| {
+                let _ = window.drag_window();
+            });
         });
     }
     {
@@ -8065,7 +8105,7 @@ mod tests {
             detail: "1.0 MiB".to_string(),
             enabled: true,
             directory: false,
-            icon_path: Some(PathBuf::from("cached-icon")),
+            icon: Some(ProjectIcon::Path(PathBuf::from("cached-icon"))),
         }];
         let mut local = vec![InstanceContentRow {
             file_name: "example.jar".into(),

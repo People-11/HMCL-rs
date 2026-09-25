@@ -1003,112 +1003,9 @@ component InstallerCard inherits Rectangle {
 }
 
 
-component InheritButton inherits Rectangle {
-    in-out property <bool> overridden;
-    width: 22px;
-    height: 22px;
-    border-radius: 11px;
-    background: transparent;
-    IconGlyph {
-        d: root.overridden ? Icons.tune : Icons.public-icon;
-        fill: root.overridden ? #5968c2 : #cccc33;
-        width: 15px;
-        height: 15px;
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-    }
-}
-
-component SettingsRowShell inherits Rectangle {
-    in property <string> label;
-    in property <string> sublabel: "";
-    in-out property <bool> overridden;
-    height: root.sublabel == "" ? 48px : 64px;
-    background: white;
-    HorizontalLayout {
-        width: 100%;
-        height: 100%;
-        padding-left: 16px;
-        padding-right: 16px;
-        spacing: 12px;
-        VerticalLayout {
-            horizontal-stretch: 1;
-            alignment: center;
-            Text { text: root.label; font-size: 12px; color: #242129; }
-            if root.sublabel != "": Text {
-                text: root.sublabel;
-                font-size: 10px;
-                color: #686571;
-                wrap: word-wrap;
-            }
-        }
-        @children
-        VerticalLayout {
-            alignment: center;
-            InheritButton { overridden <=> root.overridden; }
-        }
-    }
-    Rectangle { y: parent.height - 1px; height: 1px; background: #d4d3dc; }
-}
-
-component SettingsBoolRow inherits SettingsRowShell {
-    in-out property <bool> value;
-    in property <bool> enabled: true;
-    in property <bool> auto-inherit: false;
-    in property <bool> inherited-value: false;
-    callback edited();
-    VerticalLayout {
-        alignment: center;
-        Rectangle {
-            width: 34px;
-            height: 18px;
-            border-radius: 9px;
-            background: root.value ? #6266d8 : #c9c7d1;
-            animate background { duration: 90ms; }
-            switch-hover := TouchArea {
-                enabled: root.enabled;
-                clicked => {
-                    root.value = !root.value;
-                    root.overridden = !root.auto-inherit || root.value != root.inherited-value;
-                    root.edited();
-                }
-            }
-            Rectangle {
-                width: 14px;
-                height: 14px;
-                border-radius: 7px;
-                background: white;
-                x: root.value ? parent.width - self.width - 2px : 2px;
-                y: 2px;
-                animate x { duration: 90ms; }
-            }
-        }
-    }
-}
-
-component SettingsTextRow inherits SettingsRowShell {
-    in-out property <string> value;
-    in property <string> placeholder: "";
-    in property <bool> auto-inherit: false;
-    in property <string> inherited-value: "";
-    callback edited();
-    VerticalLayout {
-        alignment: center;
-        width: 220px;
-        MaterialDialogField {
-            width: 100%;
-            text <=> root.value;
-            placeholder: root.placeholder;
-            edited => {
-                root.overridden = !root.auto-inherit || root.value != root.inherited-value;
-                root.edited();
-            }
-        }
-    }
-}
-
 component MaterialSwitch inherits Rectangle {
     in-out property <bool> checked;
+    in property <bool> enabled: true;
     callback edited();
     width: 38px;
     height: 20px;
@@ -1116,6 +1013,7 @@ component MaterialSwitch inherits Rectangle {
     background: root.checked ? #5968c2 : #dedde7;
     animate background { duration: 100ms; }
     TouchArea {
+        enabled: root.enabled;
         clicked => {
             root.checked = !root.checked;
             root.edited();
@@ -1134,12 +1032,103 @@ component MaterialSwitch inherits Rectangle {
     }
 }
 
+component InheritButton inherits Rectangle {
+    in-out property <bool> overridden;
+    width: 22px;
+    height: 22px;
+    border-radius: 11px;
+    background: transparent;
+    IconGlyph {
+        d: root.overridden ? Icons.tune : Icons.public-icon;
+        fill: root.overridden ? #5968c2 : #a09eab;
+        width: 15px;
+        height: 15px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+    }
+}
+
+component SettingsRowShell inherits Rectangle {
+    in property <string> label;
+    in property <string> sublabel: "";
+    in-out property <bool> overridden;
+    in property <bool> enabled: true;
+    height: root.sublabel == "" ? 48px : 64px;
+    background: white;
+    opacity: root.enabled ? 1 : 0.45;
+    HorizontalLayout {
+        width: 100%;
+        height: 100%;
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 12px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            Text { text: root.label; font-size: 13px; color: #2f2c36; }
+            if root.sublabel != "": Text {
+                text: root.sublabel;
+                font-size: 11px;
+                color: #5f5c68;
+                wrap: word-wrap;
+            }
+        }
+        @children
+        VerticalLayout {
+            alignment: center;
+            InheritButton { overridden <=> root.overridden; }
+        }
+    }
+    Rectangle { y: parent.height - 1px; height: 1px; background: #e3e2ea; }
+}
+
+component SettingsBoolRow inherits SettingsRowShell {
+    in-out property <bool> value;
+    in property <bool> auto-inherit: false;
+    in property <bool> inherited-value: false;
+    callback edited();
+    VerticalLayout {
+        alignment: center;
+        MaterialSwitch {
+            checked <=> root.value;
+            enabled: root.enabled;
+            edited => {
+                root.overridden = !root.auto-inherit || root.value != root.inherited-value;
+                root.edited();
+            }
+        }
+    }
+}
+
+component SettingsTextRow inherits SettingsRowShell {
+    in-out property <string> value;
+    in property <string> placeholder: "";
+    in property <bool> auto-inherit: false;
+    in property <string> inherited-value: "";
+    callback edited();
+    VerticalLayout {
+        alignment: center;
+        width: 220px;
+        MaterialDialogField {
+            width: 100%;
+            text <=> root.value;
+            placeholder: root.placeholder;
+            enabled: root.enabled;
+            edited => {
+                root.overridden = !root.auto-inherit || root.value != root.inherited-value;
+                root.edited();
+            }
+        }
+    }
+}
+
 component LauncherSettingLine inherits Rectangle {
     in property <string> label;
     in property <string> sublabel: "";
     in property <bool> enabled: true;
     height: root.sublabel == "" ? 48px : 64px;
-    background: line-hover.pressed ? #0000000a : (line-hover.has-hover ? #ffffff25 : #ffffff00);
+    background: line-hover.pressed ? #e2e3ec : (line-hover.has-hover ? #f4f4f8 : #ffffff00);
+    opacity: root.enabled ? 1 : 0.45;
     animate background { duration: 90ms; }
     callback clicked();
     line-hover := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
@@ -1162,7 +1151,7 @@ component LauncherSettingLine inherits Rectangle {
         }
         @children
     }
-    Rectangle { y: parent.height - 1px; height: 1px; background: #c9c8d0; }
+    Rectangle { y: parent.height - 1px; height: 1px; background: #e3e2ea; }
 }
 
 component LauncherToggleLine inherits LauncherSettingLine {
@@ -1176,6 +1165,7 @@ component LauncherToggleLine inherits LauncherSettingLine {
         alignment: center;
         MaterialSwitch {
             checked <=> root.value;
+            enabled: root.enabled;
             edited => { root.edited(); }
         }
     }
@@ -1261,10 +1251,11 @@ component ContentCard inherits Rectangle {
 }
 
 component SettingsCardTitle inherits Text {
-    height: 24px;
-    color: #35323c;
+    height: 26px;
+    color: #3d3a48;
     font-size: 12px;
-    vertical-alignment: center;
+    font-weight: 600;
+    vertical-alignment: bottom;
 }
 
 component SettingsGroup inherits ContentCard {
@@ -1296,7 +1287,7 @@ component SettingsSublist inherits Rectangle {
         width: root.width;
         height: root.header-height;
         z: 2;
-        background: sublist-hover.pressed ? #e2e3ec : (sublist-hover.has-hover ? #f1f1f6 : transparent);
+        background: sublist-hover.pressed ? #e2e3ec : (sublist-hover.has-hover ? #f4f4f8 : transparent);
         animate background { duration: 90ms; }
         sublist-hover := TouchArea { clicked => { root.expanded = !root.expanded; } }
         HorizontalLayout {
@@ -1306,11 +1297,11 @@ component SettingsSublist inherits Rectangle {
             VerticalLayout {
                 horizontal-stretch: 1;
                 alignment: center;
-                Text { text: root.title; color: #292731; font-size: 12px; }
+                Text { text: root.title; color: #2f2c36; font-size: 13px; }
                 if root.subtitle != "": Text {
                     text: root.subtitle;
-                    color: #696671;
-                    font-size: 10px;
+                    color: #5f5c68;
+                    font-size: 11px;
                     wrap: word-wrap;
                 }
             }
@@ -1335,6 +1326,7 @@ component SettingsSublist inherits Rectangle {
                 }
             }
         }
+        Rectangle { y: parent.height - 1px; height: 1px; background: #e3e2ea; }
     }
 
     Rectangle {
@@ -2269,7 +2261,7 @@ export component AppWindow inherits Window {
     callback derive-offline-uuid(string) -> string;
     callback valid-uuid(string) -> bool;
 
-    callback window-drag(length, length);
+    callback window-drag();
     callback window-minimize();
     callback window-close();
 
@@ -2634,9 +2626,9 @@ export component AppWindow inherits Window {
             animate background { duration: 120ms; }
 
             titlebar-drag := TouchArea {
-                moved => {
-                    if self.pressed {
-                        root.window-drag(self.mouse-x - self.pressed-x, self.mouse-y - self.pressed-y);
+                pointer-event(event) => {
+                    if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                        root.window-drag();
                     }
                 }
             }
@@ -4681,7 +4673,6 @@ export component AppWindow inherits Window {
                                         label: "不生成优化用 JVM 参数";
                                         value <=> root.global-no-optimizing-jvm-options;
                                         enabled: !root.global-no-jvm-options;
-                                        opacity: root.global-no-jvm-options ? 0.45 : 1;
                                     }
                                     LauncherTextLine { label: "JVM 参数"; value <=> root.global-jvm-options; placeholder: "-Dexample=value"; }
                                     SettingsSublist {
@@ -4724,7 +4715,6 @@ export component AppWindow inherits Window {
                                         label: "Natives 目录";
                                         value <=> root.global-natives-directory;
                                         enabled: root.global-use-custom-natives;
-                                        opacity: root.global-use-custom-natives ? 1 : 0.45;
                                     }
                                 }
                             }
@@ -4734,11 +4724,12 @@ export component AppWindow inherits Window {
                     if root.settings-tab == 1: Flickable {
                         width: 100%;
                         height: 100%;
-                        viewport-height: 150px + max(root.java-runtimes.length, 1) * 70px;
-                        VerticalLayout {
+                        viewport-height: java-settings-content.preferred-height;
+                        java-settings-content := VerticalLayout {
                             padding-left: 18px;
                             padding-right: 18px;
                             padding-top: 14px;
+                            padding-bottom: 18px;
                             spacing: 10px;
                             ContentCard {
                                 height: 44px;
@@ -4807,8 +4798,8 @@ export component AppWindow inherits Window {
                     if root.settings-tab == 3: Flickable {
                         width: 100%;
                         height: 100%;
-                        viewport-height: 180px;
-                        VerticalLayout {
+                        viewport-height: appearance-settings-content.preferred-height;
+                        appearance-settings-content := VerticalLayout {
                             padding-left: 18px;
                             padding-right: 18px;
                             padding-top: 12px;
@@ -4828,8 +4819,8 @@ export component AppWindow inherits Window {
                     if root.settings-tab == 4: Flickable {
                         width: 100%;
                         height: 100%;
-                        viewport-height: 300px;
-                        VerticalLayout {
+                        viewport-height: download-settings-content.preferred-height;
+                        download-settings-content := VerticalLayout {
                             padding-left: 18px;
                             padding-right: 18px;
                             padding-top: 12px;
@@ -4862,7 +4853,6 @@ export component AppWindow inherits Window {
                                         value <=> root.download-threads;
                                         placeholder: "64";
                                         enabled: !root.auto-download-threads;
-                                        opacity: root.auto-download-threads ? 0.55 : 1;
                                     }
                                 }
                             }
@@ -5158,7 +5148,6 @@ export component AppWindow inherits Window {
                                     auto-inherit: true;
                                     inherited-value: root.global-no-optimizing-jvm-options;
                                     enabled: !root.no-jvm-options;
-                                    opacity: root.no-jvm-options ? 0.45 : 1;
                                 }
                                 SettingsTextRow {
                                     label: "JVM 参数";
@@ -5247,6 +5236,7 @@ export component AppWindow inherits Window {
                                     label: "Natives 目录";
                                     overridden <=> root.natives-directory-overridden;
                                     value <=> root.natives-directory;
+                                    enabled: root.use-custom-natives;
                                     auto-inherit: true;
                                     inherited-value: root.global-natives-directory;
                                 }

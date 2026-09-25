@@ -226,9 +226,8 @@ pub fn java_runtime_from_binary(
 }
 
 /// 极简 Java 探测：`java_override` 给了路径就直接用（多半是 `java-install` 刚装好
-/// 的托管 Java），否则退回看 `JAVA_HOME` 和 PATH 上的 `java(.exe)`。真正的注册表/
-/// 常见安装目录扫描是本模块文档里明确标注推迟的部分（`JavaManager.java` 那 38KB
-/// 的大头），这里先凑合能跑。
+/// 的托管 Java），否则退回看 `JAVA_HOME` 和 PATH 上的 `java(.exe)`。要列出本机
+/// 全部 Java（含常见安装目录）用 [`find_all_javas`]。
 pub fn find_a_java(
     java_override: Option<&std::path::Path>,
 ) -> Result<JavaRuntime, JavaDetectError> {
@@ -258,6 +257,85 @@ pub fn find_a_java(
     }
 
     Err(JavaDetectError::NotFound)
+}
+
+/// 扫描本机所有能识别的 Java：`JAVA_HOME`、PATH，再加上各家发行版的默认安装目录
+/// （`<根>/<厂商>/<jdk-xx>/bin/java`）。每个候选只读一次 `release` 文件，不起进程。
+// ponytail: 没扫注册表。主流发行版的 MSI 都装在下面这些目录里，漏掉的再补注册表。
+pub fn find_all_javas() -> Vec<JavaRuntime> {
+    let java_name = if cfg!(windows) { "java.exe" } else { "java" };
+    let candidates: Vec<PathBuf> = std::env::var_os("JAVA_HOME")
+        .map(|home| PathBuf::from(home).join("bin").join(java_name))
+        .into_iter()
+        .chain(
+            std::env::var_os("PATH")
+                .into_iter()
+                .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+                .map(|dir| dir.join(java_name)),
+        )
+        .collect();
+    javas_in(candidates, &java_install_roots())
+}
+
+fn javas_in(mut candidates: Vec<PathBuf>, roots: &[PathBuf]) -> Vec<JavaRuntime> {
+    let java_name = if cfg!(windows) { "java.exe" } else { "java" };
+    for root in roots {
+        let Ok(homes) = std::fs::read_dir(root) else {
+            continue;
+        };
+        candidates.extend(homes.flatten().flat_map(|home| {
+            let home = home.path();
+            // macOS 的 JDK 包多一层 Contents/Home。
+            [
+                home.join("bin").join(java_name),
+                home.join("Contents").join("Home").join("bin").join(java_name),
+            ]
+        }));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|candidate| candidate.is_file())
+        .filter(|candidate| {
+            seen.insert(std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.clone()))
+        })
+        .filter_map(|candidate| java_runtime_from_binary(candidate, false).ok())
+        .collect()
+}
+
+/// 放 Java 安装目录的父目录：下一层就是一个个 JDK/JRE 的 home。
+fn java_install_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }) {
+        // IntelliJ 下载的 JDK。
+        roots.push(PathBuf::from(home).join(".jdks"));
+    }
+    if cfg!(windows) {
+        const VENDORS: [&str; 9] = [
+            "Java",
+            "Eclipse Adoptium",
+            "Eclipse Foundation",
+            "Zulu",
+            "Microsoft",
+            "BellSoft",
+            "Amazon Corretto",
+            "Semeru",
+            "Oracle\\Java",
+        ];
+        for program_files in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"] {
+            if let Some(dir) = std::env::var_os(program_files) {
+                let dir = PathBuf::from(dir);
+                roots.extend(VENDORS.iter().map(|vendor| dir.join(vendor)));
+            }
+        }
+    } else if cfg!(target_os = "macos") {
+        roots.push(PathBuf::from("/Library/Java/JavaVirtualMachines"));
+    } else {
+        roots.push(PathBuf::from("/usr/lib/jvm"));
+        roots.push(PathBuf::from("/usr/java"));
+    }
+    roots
 }
 
 impl PartialEq for JavaRuntime {
@@ -314,6 +392,25 @@ OS_NAME="Windows"
 OS_ARCH="x86_64"
 IMPLEMENTOR="Oracle Corporation"
 "#;
+
+    #[test]
+    fn scans_vendor_roots_and_dedupes_candidates() {
+        let java_name = if cfg!(windows) { "java.exe" } else { "java" };
+        let root = std::env::temp_dir().join(format!("hmcl-java-scan-{}", std::process::id()));
+        let home = root.join("jdk-17");
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        std::fs::write(home.join("bin").join(java_name), b"").unwrap();
+        std::fs::write(home.join("release"), TEMURIN_17_WINDOWS_RELEASE).unwrap();
+        // 没有 release 文件的目录不算 Java。
+        std::fs::create_dir_all(root.join("not-a-jdk").join("bin")).unwrap();
+
+        // 同一个 java 既在 PATH 里又能从目录扫到，只出现一次。
+        let found = javas_in(vec![home.join("bin").join(java_name)], &[root.clone()]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].parsed_version(), Some(17));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn parses_temurin_17_release_file() {
